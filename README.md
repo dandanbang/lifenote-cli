@@ -121,6 +121,26 @@ https://mcp.mylifenote.ai/mcp
 
 Approve the OAuth screen. No install needed.
 
+### ChatGPT (Pro / Team / Enterprise / Edu)
+
+OpenAI added remote-MCP-server support in late 2025. Steps:
+
+1. Open ChatGPT → **Settings → Apps & Connectors → Advanced settings**
+2. Toggle **Developer Mode** ON
+3. Back in Apps & Connectors → **Add new connector**
+4. Name: `Life Note`, URL: `https://mcp.mylifenote.ai/mcp`
+5. Authentication: **OAuth**, then confirm "I trust this application"
+
+Free-tier ChatGPT doesn't support remote MCP servers yet — paid plans only.
+
+### Gemini
+
+Two paths, depending on which Gemini you use:
+
+- **Gemini CLI** (Google's developer CLI): supports MCP natively. Configure `lifenote` as an MCP server in your Gemini CLI settings (`~/.gemini/settings.json` or similar) — same `command: lifenote, args: [mcp]` shape as Claude Desktop.
+- **Gemini Enterprise** (Google Cloud paid product): supported via custom MCP server data stores.
+- **Gemini web app** (`gemini.google.com`) / Gemini mobile app: **not yet supported** by Google's regular Gemini app. Track [this issue](https://support.google.com/gemini/thread/409485795/) — Google is rolling MCP support out gradually.
+
 ### Cursor / Codex / other MCP clients
 
 Same `command: lifenote, args: [mcp]` pattern, or point them at the HTTP endpoint directly.
