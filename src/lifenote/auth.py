@@ -1,18 +1,22 @@
 """
-Token storage + device-flow login.
+Token storage + device-flow login + automatic refresh.
 
 Storage precedence (read order):
   1. LIFENOTE_API_TOKEN env var (for CI / Docker / headless agents)
   2. OS keychain (macOS Keychain, Windows Cred Manager, Linux libsecret)
+     stores a JSON blob with {access, refresh, expires_at} so the CLI can
+     transparently refresh access tokens before they expire (Codex P2 #5).
 
 Env-var path is essential: keyring fails or is unavailable in many headless
 environments (CI runners, Docker without secrets manager, sandboxed agents).
+Env-var mode skips refresh — the operator is expected to rotate it.
 """
+import json
 import os
-import platform
 import socket
 import time
 import webbrowser
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -20,27 +24,114 @@ from .config import (
     ENV_TOKEN_VAR, KEYRING_SERVICE, KEYRING_USERNAME, base_url,
 )
 
+# Refresh access token when it has fewer than this many seconds left
+REFRESH_LEEWAY_SECONDS = 120
+
 
 # ---------------------------------------------------------------------------
 # Storage
 # ---------------------------------------------------------------------------
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _read_keyring_blob() -> dict | None:
+    try:
+        import keyring
+        raw = keyring.get_password(KEYRING_SERVICE, KEYRING_USERNAME)
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        blob = json.loads(raw)
+        if isinstance(blob, dict) and 'access' in blob:
+            return blob
+        # Legacy: pre-refresh-rotation versions stored just the access token
+        return {'access': raw, 'refresh': None, 'expires_at': None}
+    except (ValueError, TypeError):
+        return {'access': raw, 'refresh': None, 'expires_at': None}
+
+
+def _write_keyring_blob(blob: dict) -> None:
+    import keyring
+    keyring.set_password(KEYRING_SERVICE, KEYRING_USERNAME, json.dumps(blob))
+
+
+def store_credentials(access: str, refresh: str | None, expires_in: int | None) -> None:
+    """Save access + refresh + computed absolute expiry."""
+    expires_at = None
+    if expires_in:
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
+    _write_keyring_blob({'access': access, 'refresh': refresh, 'expires_at': expires_at})
+
+
 def get_token() -> str | None:
-    """Env var first, keyring second. Returns the access token or None."""
+    """
+    Env var first, keyring second. If the keyring blob has a refresh token
+    and the access is near expiry, transparently refreshes. Returns the
+    access token or None.
+    """
     env = os.environ.get(ENV_TOKEN_VAR)
     if env:
         return env.strip()
+    blob = _read_keyring_blob()
+    if not blob:
+        return None
+    access = blob.get('access')
+    refresh = blob.get('refresh')
+    expires_at = blob.get('expires_at')
+    if access and refresh and expires_at and _is_near_expiry(expires_at):
+        rotated = _try_refresh(refresh)
+        if rotated:
+            return rotated
+    return access
+
+
+def _is_near_expiry(expires_at_iso: str) -> bool:
     try:
-        import keyring
-        return keyring.get_password(KEYRING_SERVICE, KEYRING_USERNAME)
+        exp = datetime.fromisoformat(expires_at_iso)
+    except ValueError:
+        return True
+    return (exp - datetime.now(timezone.utc)).total_seconds() < REFRESH_LEEWAY_SECONDS
+
+
+def _try_refresh(refresh_plain: str) -> str | None:
+    """
+    Exchange refresh token for a new pair via /api/agent/v1/oauth/token.
+    On reuse-detected (invalid_grant), clear stored creds — the user must
+    re-login. Returns new access token on success, None on failure.
+    """
+    try:
+        with httpx.Client(timeout=15.0) as c:
+            r = c.post(
+                f'{base_url()}/api/agent/v1/oauth/token',
+                data={'grant_type': 'refresh_token', 'refresh_token': refresh_plain},
+            )
+        if r.status_code != 200:
+            # invalid_grant could mean: expired, revoked, OR reuse detected
+            # (family burned). In any case, the stored creds are dead.
+            clear_token()
+            return None
+        body = r.json()
+        store_credentials(
+            access=body['access_token'],
+            refresh=body.get('refresh_token'),
+            expires_in=body.get('expires_in'),
+        )
+        return body['access_token']
     except Exception:
         return None
 
 
 def set_token(token: str) -> None:
-    """Store in keyring. Env var (if set) still wins on read; that's correct."""
-    import keyring
-    keyring.set_password(KEYRING_SERVICE, KEYRING_USERNAME, token)
+    """
+    Legacy API — store just an access token (no refresh, no expiry). Kept
+    for backward-compat with old-CLI users; new logins go through
+    store_credentials() instead.
+    """
+    _write_keyring_blob({'access': token, 'refresh': None, 'expires_at': None})
 
 
 def clear_token() -> bool:

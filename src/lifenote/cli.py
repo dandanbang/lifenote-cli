@@ -16,7 +16,7 @@ import typer
 
 from . import __version__
 from .api import APIError, get
-from .auth import device_login, set_token, clear_token, get_token
+from .auth import device_login, store_credentials, clear_token, get_token
 from .output import console, emit
 
 app = typer.Typer(
@@ -61,7 +61,13 @@ def auth_login(
     except RuntimeError as e:
         console.print(f"[red]Login failed:[/] {e}")
         raise typer.Exit(1)
-    set_token(result["access_token"])
+    # Store full credentials so the CLI can transparently refresh when the
+    # 1-hour access token nears expiry. (Codex P2 #5)
+    store_credentials(
+        access=result["access_token"],
+        refresh=result.get("refresh_token"),
+        expires_in=result.get("expires_in"),
+    )
     console.print(f"[green]Signed in.[/] Scopes: {result.get('scope', '?')}")
 
 

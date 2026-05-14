@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lifenote"
-version = "0.1.0"
+version = "0.1.1"
 description = "Bring your private journal into your AI agents — Claude Code, Cursor, Codex. MCP-compatible."
 readme = "README.md"
 license = { text = "MIT" }
