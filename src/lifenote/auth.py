@@ -115,14 +115,21 @@ def _refresh_with_lock(refresh_plain: str) -> str | None:
     keyring; if another process already rotated, return its newly-stored
     access without burning the family.
 
-    Codex round 4 P2: previous fcntl-only implementation silently fell back
-    to unlocked refresh on Windows. Now uniform via the filelock library.
+    Codex round 5 P3: fail closed if filelock is missing — racing refresh
+    would burn the family on concurrent processes. filelock is a declared
+    dependency, so missing it means a broken install; tell the user to
+    reinstall rather than silently downgrading the guarantee.
     """
     try:
         from filelock import FileLock, Timeout
     except ImportError:
-        # Last-ditch fallback if the dependency isn't installed for some reason
-        return _try_refresh(refresh_plain)
+        import sys as _sys
+        _sys.stderr.write(
+            'lifenote: filelock dependency is missing — refresh would race '
+            'across processes and burn your session. Reinstall the CLI '
+            '(pipx reinstall lifenote) and try again.\n'
+        )
+        return None
 
     lock = FileLock(_lock_path() + '.flock', timeout=30)
     try:
