@@ -17,7 +17,7 @@ import sys
 
 import httpx
 
-from .auth import get_token, _try_refresh, _read_keyring_blob
+from .auth import get_token, _refresh_with_lock, _read_keyring_blob
 from .config import base_url
 
 
@@ -43,10 +43,12 @@ def run() -> None:
         return _http_client.post(url, headers=h, content=line)
 
     def refresh_or_die() -> bool:
+        # Cross-process lock + keyring re-read so concurrent proxies don't
+        # both rotate and burn the family (Codex round 3 P2 #4)
         blob = _read_keyring_blob()
         if not blob or not blob.get('refresh'):
             return False
-        return _try_refresh(blob['refresh']) is not None
+        return _refresh_with_lock(blob['refresh']) is not None
 
     with httpx.Client(timeout=120.0) as _http_client:
         for line in sys.stdin:

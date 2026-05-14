@@ -70,8 +70,12 @@ def store_credentials(access: str, refresh: str | None, expires_in: int | None) 
 def get_token() -> str | None:
     """
     Env var first, keyring second. If the keyring blob has a refresh token
-    and the access is near expiry, transparently refreshes. Returns the
-    access token or None.
+    and the access is near expiry, transparently refreshes (with a
+    cross-process file lock so two CLIs/MCP-proxies running concurrently
+    don't both rotate the same refresh token and trigger family-burn —
+    Codex round 3 P2 #4).
+
+    Returns the access token or None.
     """
     env = os.environ.get(ENV_TOKEN_VAR)
     if env:
@@ -83,7 +87,7 @@ def get_token() -> str | None:
     refresh = blob.get('refresh')
     expires_at = blob.get('expires_at')
     if access and refresh and expires_at and _is_near_expiry(expires_at):
-        rotated = _try_refresh(refresh)
+        rotated = _refresh_with_lock(refresh)
         if rotated:
             return rotated
     return access
@@ -97,11 +101,69 @@ def _is_near_expiry(expires_at_iso: str) -> bool:
     return (exp - datetime.now(timezone.utc)).total_seconds() < REFRESH_LEEWAY_SECONDS
 
 
+def _lock_path() -> str:
+    """Per-user file lock for refresh — under XDG runtime dir if possible."""
+    import tempfile
+    base = os.environ.get('XDG_RUNTIME_DIR') or tempfile.gettempdir()
+    return os.path.join(base, 'lifenote-cli-refresh.lock')
+
+
+def _refresh_with_lock(refresh_plain: str) -> str | None:
+    """
+    Acquire an OS-level file lock around the refresh exchange. While the
+    lock is held, we re-read the keyring inside the lock — if another
+    process already rotated, return its newly-stored access without
+    burning the family.
+
+    Falls back to the unlocked path if file locking isn't available
+    (e.g. fcntl missing on Windows; we'd still want refresh to function).
+    """
+    try:
+        import fcntl
+    except ImportError:
+        return _try_refresh(refresh_plain)
+
+    lock_path = _lock_path()
+    try:
+        # 'a+' creates if missing; we never write to it
+        f = open(lock_path, 'a+')
+    except OSError:
+        return _try_refresh(refresh_plain)
+
+    try:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        except OSError:
+            return _try_refresh(refresh_plain)
+
+        # While holding the lock, re-read keyring — another process may have
+        # already done the rotation; if so, use its newly-stored access.
+        latest = _read_keyring_blob() or {}
+        latest_refresh = latest.get('refresh')
+        latest_access = latest.get('access')
+        latest_expires = latest.get('expires_at')
+        if latest_refresh != refresh_plain and latest_access and latest_expires:
+            if not _is_near_expiry(latest_expires):
+                return latest_access  # someone else just refreshed — use it
+        # Either the keyring still has our (near-expiry) creds, or another
+        # process is also racing and we got here first. Either way: rotate.
+        return _try_refresh(latest_refresh or refresh_plain)
+    finally:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        f.close()
+
+
 def _try_refresh(refresh_plain: str) -> str | None:
     """
     Exchange refresh token for a new pair via /api/agent/v1/oauth/token.
     On reuse-detected (invalid_grant), clear stored creds — the user must
     re-login. Returns new access token on success, None on failure.
+
+    Caller is responsible for serialization (use _refresh_with_lock above
+    when running from a long-lived process like mcp_proxy).
     """
     try:
         with httpx.Client(timeout=15.0) as c:
