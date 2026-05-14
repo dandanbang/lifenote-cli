@@ -23,6 +23,7 @@ dependencies = [
   "keyring>=24.0",
   "rich>=13.0",
   "mcp>=1.0",
+  "filelock>=3.12",  # cross-platform refresh-token lock (Codex round 4)
 ]
 
 [project.urls]

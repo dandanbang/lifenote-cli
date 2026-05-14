@@ -110,50 +110,34 @@ def _lock_path() -> str:
 
 def _refresh_with_lock(refresh_plain: str) -> str | None:
     """
-    Acquire an OS-level file lock around the refresh exchange. While the
-    lock is held, we re-read the keyring inside the lock — if another
-    process already rotated, return its newly-stored access without
-    burning the family.
+    Acquire a cross-platform file lock around the refresh exchange (filelock
+    handles Windows, macOS, Linux). While holding the lock we re-read the
+    keyring; if another process already rotated, return its newly-stored
+    access without burning the family.
 
-    Falls back to the unlocked path if file locking isn't available
-    (e.g. fcntl missing on Windows; we'd still want refresh to function).
+    Codex round 4 P2: previous fcntl-only implementation silently fell back
+    to unlocked refresh on Windows. Now uniform via the filelock library.
     """
     try:
-        import fcntl
+        from filelock import FileLock, Timeout
     except ImportError:
+        # Last-ditch fallback if the dependency isn't installed for some reason
         return _try_refresh(refresh_plain)
 
-    lock_path = _lock_path()
+    lock = FileLock(_lock_path() + '.flock', timeout=30)
     try:
-        # 'a+' creates if missing; we never write to it
-        f = open(lock_path, 'a+')
-    except OSError:
-        return _try_refresh(refresh_plain)
-
-    try:
-        try:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        except OSError:
-            return _try_refresh(refresh_plain)
-
-        # While holding the lock, re-read keyring — another process may have
-        # already done the rotation; if so, use its newly-stored access.
-        latest = _read_keyring_blob() or {}
-        latest_refresh = latest.get('refresh')
-        latest_access = latest.get('access')
-        latest_expires = latest.get('expires_at')
-        if latest_refresh != refresh_plain and latest_access and latest_expires:
-            if not _is_near_expiry(latest_expires):
-                return latest_access  # someone else just refreshed — use it
-        # Either the keyring still has our (near-expiry) creds, or another
-        # process is also racing and we got here first. Either way: rotate.
-        return _try_refresh(latest_refresh or refresh_plain)
-    finally:
-        try:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        except Exception:
-            pass
-        f.close()
+        with lock:
+            latest = _read_keyring_blob() or {}
+            latest_refresh = latest.get('refresh')
+            latest_access = latest.get('access')
+            latest_expires = latest.get('expires_at')
+            if latest_refresh != refresh_plain and latest_access and latest_expires:
+                if not _is_near_expiry(latest_expires):
+                    return latest_access  # someone else just refreshed — use it
+            return _try_refresh(latest_refresh or refresh_plain)
+    except Timeout:
+        # Another process is taking too long; don't burn the family
+        return None
 
 
 def _try_refresh(refresh_plain: str) -> str | None:
