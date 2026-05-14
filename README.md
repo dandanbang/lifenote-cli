@@ -116,7 +116,7 @@ That's it. Open any Claude Code session and ask away.
 Settings → Connectors → **Add Connector** → paste:
 
 ```
-https://mcp.mylifenote.ai/api/agent/v1/mcp
+https://mcp.mylifenote.ai/mcp
 ```
 
 Approve the OAuth screen. No install needed.
