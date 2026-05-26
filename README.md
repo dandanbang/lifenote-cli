@@ -141,6 +141,30 @@ Two paths, depending on which Gemini you use:
 - **Gemini Enterprise** (Google Cloud paid product): supported via custom MCP server data stores.
 - **Gemini web app** (`gemini.google.com`) / Gemini mobile app: **not yet supported** by Google's regular Gemini app. Track [this issue](https://support.google.com/gemini/thread/409485795/) — Google is rolling MCP support out gradually.
 
+### Hermes (NousResearch)
+
+Self-hosted autonomous agent across Telegram, Discord, Slack, WhatsApp, Signal, SMS, etc. Add to `~/.hermes/config.yaml`:
+
+```yaml
+mcp_servers:
+  lifenote:
+    url: "https://mcp.mylifenote.ai/mcp"
+    auth: oauth
+```
+
+Then `/reload-mcp` inside any Hermes session. Full guide: [docs/HERMES.md](docs/HERMES.md).
+
+### OpenClaw
+
+Self-hosted personal AI assistant ("the lobster way"). One-liner:
+
+```bash
+openclaw mcp set lifenote '{"url":"https://mcp.mylifenote.ai/mcp","transport":"streamable-http"}'
+openclaw doctor --fix
+```
+
+Full guide (including OAuth bridge for desktop and bearer-token for headless): [docs/OPENCLAW.md](docs/OPENCLAW.md).
+
 ### Cursor / Codex / other MCP clients
 
 Same `command: lifenote, args: [mcp]` pattern, or point them at the HTTP endpoint directly.
