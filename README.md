@@ -15,23 +15,29 @@ That's it. From any Claude Code / Cursor / Claude Desktop session, you can now a
 
 ## What this unlocks
 
-Real things you can ask, once connected:
+Once connected, just ask in plain English — the agent figures out which tools to call. Not sure where to start? Match it to what you need:
 
-> *"I have a hard conversation with my cofounder today. What have I been writing about her?"*
+**🌧️ Feeling down** — *"Look back through my journal and remind me of my small wins and the moments I actually grew — evidence I'm further along than I feel."*
 
-> *"I'm stuck. What was I trying to accomplish this month?"*
+**🔥 Angry or hurt** — *"I'm worked up about this. What have I written before about this person or situation — and what usually helps me settle?"*
 
-> *"What did Marcus Aurelius (or Jung, or my Inner Wisdom) say to me about anxiety?"*
+**💡 Seeking clarity** — *"Across my recent entries, what are my top recurring patterns — and the triggers behind them?"*
 
-> *"I remember saving a beautiful Jung line about words being vessels — find it."*
+**🌱 Looking to grow** — *"What blind spot keeps showing up in my writing — and what have my mentors said that speaks to it?"*
 
-> *"Pre-board-meeting check: what's been weighing on me this week?"*
+**🪧 Facing a decision** — *"I'm torn. Based on what I've written and my Life Goal, what do I actually value here?"*
 
-> *"What's my Life Goal, what's my focus this year, and what practices am I doing?"*
+**🧭 Feeling adrift** — *"What am I working on right now, and where am I drifting from this year's focus?"*
 
-> *"I'm drafting a post about late-bloomer entrepreneurship. What have I journaled on this theme?"*
+### Power-user asks
 
-The agent figures out which tools to call. You just ask in plain English.
+The 14 read-only tools compose, so you can chain them:
+
+> *"Cross-reference my journal and my saved wisdom on burnout — where do they agree, where do they diverge?"*
+
+> *"Pull my last month of entries and draft a weekly-review summary I can paste into my journal."*
+
+> *"Given my Life Goal and this year's focus, what have I actually made progress on — with evidence from my entries?"*
 
 ---
 
