@@ -4,18 +4,23 @@ lifenote CLI — typer entry point.
 Commands:
   auth login | logout | whoami
   search <query>
-  entries [--since] [--limit]
+  entries [--since] [--until] [--limit] [--with-responses]
+          [--updated-since] [--after-id] [--all]
+  export [--since] [--until] [--format md|json|csv] [--include-analysis]
+         [--include-mentors] [--output]
+  sync <folder> [--full]
   today | week
   conversations list | show <id>
   mcp                 # stdio MCP server
   skills install      # bundled Claude Code skill
 """
 import sys
+from pathlib import Path
 
 import typer
 
 from . import __version__
-from .api import APIError, get
+from .api import APIError, Session, get
 from .auth import device_login, store_credentials, clear_token, get_token
 from .output import console, emit
 
@@ -115,18 +120,106 @@ def search(
 
 @app.command()
 def entries(
-    since: str | None = typer.Option(None, help="Time bound: 7d / 30d / YYYY-MM-DD"),
-    limit: int = typer.Option(20, help="Max entries (1–100)."),
+    since: str | None = typer.Option(None, help="Entry date from: 7d / 30d / YYYY-MM-DD"),
+    until: str | None = typer.Option(None, help="Entry date up to (inclusive): YYYY-MM-DD"),
+    limit: int = typer.Option(20, help="Max entries per page (1–100)."),
+    with_responses: bool = typer.Option(
+        False, "--with-responses",
+        help="Add Daily Insights (analysis) and mentor replies to each entry."),
+    updated_since: str | None = typer.Option(
+        None, "--updated-since",
+        help="Only entries written, edited, or given a new mentor reply since "
+             "this ISO time (e.g. 2026-10-20T00:00:00Z). Oldest change first."),
+    after_id: int | None = typer.Option(
+        None, "--after-id", help="Only entries with a higher id. Lowest id first."),
+    all_pages: bool = typer.Option(False, "--all", help="Fetch every page, not just one."),
     json: bool = typer.Option(False, "--json"),
 ):
-    """List recent journal entries."""
+    """List journal entries. --json output carries `as_of`: pass it as --updated-since next time."""
     params: dict = {"limit": limit}
     if since:
         params["since"] = since
+    if until:
+        params["until"] = until
+    if with_responses:
+        params["with_responses"] = 1
+    if updated_since:
+        params["updated_since"] = updated_since
+    if after_id is not None:
+        params["after_id"] = after_id
     try:
-        emit(get("/api/agent/v1/entries", params=params), json)
+        with Session() as s:
+            if all_pages:
+                meta: dict = {}
+                rows = list(s.iter_entries(params, page_size=max(1, min(100, limit)), meta=meta))
+                payload = {"entries": rows, "count": len(rows), "as_of": meta.get("as_of")}
+            else:
+                payload = s.get("/api/agent/v1/entries", params=params)
+        emit(payload, json)
     except APIError as e:
         _handle_api_error(e)
+
+
+@app.command()
+def export(
+    since: str | None = typer.Option(None, help="Entry date from: 7d / 30d / YYYY-MM-DD"),
+    until: str | None = typer.Option(None, help="Entry date up to (inclusive): YYYY-MM-DD"),
+    fmt: str = typer.Option("md", "--format", help="md | json | csv"),
+    include_analysis: bool = typer.Option(False, "--include-analysis",
+                                          help="Include Daily Insights."),
+    include_mentors: bool = typer.Option(False, "--include-mentors",
+                                         help="Include mentor replies."),
+    output: Path | None = typer.Option(None, "--output", "-o",
+                                       help="Write to this file instead of stdout."),
+):
+    """Export entries (oldest first) as Markdown, JSON, or CSV."""
+    from .render import export_csv, export_json, export_md
+    renderers = {"md": export_md, "json": export_json, "csv": export_csv}
+    if fmt not in renderers:
+        console.print(f"[red]Unknown --format {fmt!r}.[/] Use md, json, or csv.")
+        raise typer.Exit(2)
+    params: dict = {}
+    if since:
+        params["since"] = since
+    if until:
+        params["until"] = until
+    if include_analysis or include_mentors:
+        params["with_responses"] = 1
+    try:
+        with Session() as s:
+            rows = list(s.iter_entries(params))
+    except APIError as e:
+        _handle_api_error(e)
+    rows.sort(key=lambda e: (str(e.get("date") or ""), e.get("id") or 0))
+    text = renderers[fmt](rows, include_analysis=include_analysis,
+                          include_mentors=include_mentors)
+    if output:
+        output.expanduser().write_text(text, encoding="utf-8")
+        console.print(f"[green]Exported[/] {len(rows)} entries → {output}",
+                      highlight=False, soft_wrap=True)
+    else:
+        sys.stdout.write(text)
+
+
+@app.command()
+def sync(
+    folder: Path = typer.Argument(..., help="Folder to keep in sync, e.g. your Obsidian vault's 'Life Note' folder."),
+    full: bool = typer.Option(False, "--full", help="Re-pull every entry, ignoring the saved cursor."),
+):
+    """Mirror your journal into FOLDER: one Markdown note per entry, with mentor replies.
+
+    Safe to run on a schedule: only changed notes are rewritten, and anything
+    you write below a note's "your notes" line is kept.
+    """
+    from .sync import sync as run_sync
+    try:
+        with Session() as s:
+            stats = run_sync(folder, s, full=full)
+    except APIError as e:
+        _handle_api_error(e)
+    console.print(
+        f"[green]Synced[/] {stats['new']} new, {stats['updated']} updated, "
+        f"{stats['unchanged']} unchanged → {folder}", highlight=False, soft_wrap=True)
 
 
 @app.command()

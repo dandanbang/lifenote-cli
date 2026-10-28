@@ -82,6 +82,70 @@ Add `--json` to any command for piping into agents:
 lifenote search "burnout" --json | claude "summarize the patterns"
 ```
 
+### The full picture: Daily Insights + mentor replies
+
+```bash
+lifenote entries --since 7d --with-responses --json      # analysis + every mentor reply per entry
+lifenote entries --updated-since 2026-10-20T00:00:00Z --all --json   # only what changed
+lifenote entries --after-id 12345 --all --json           # only entries newer than id 12345
+```
+
+`--updated-since` returns entries that were written, **edited**, or got a **new mentor reply** since that time, oldest change first. Every `--json` result carries `as_of`; pass it back as `--updated-since` next time.
+
+### Export
+
+```bash
+lifenote export --since 2026-01-01 --until 2026-06-30 --format md --include-analysis --include-mentors -o journal.md
+lifenote export --format csv --include-mentors -o journal.csv
+lifenote export --since 30d --format json --include-analysis
+```
+
+### Weekly Obsidian sync
+
+`lifenote sync <folder>` keeps a folder of Markdown notes in step with your journal: one note per entry (`2026/2026-10-28-12345.md`), YAML frontmatter (date, mood, mentors, feelings, topics, people), the Daily Insight, and each mentor reply as an Obsidian callout.
+
+```bash
+lifenote sync ~/Obsidian/MyVault/"Life Note"
+```
+
+- The first run pulls everything. Later runs fetch only entries written, edited, or given a new mentor reply since the last run. The cursor lives in the folder (`.lifenote-sync.json`).
+- Re-running is safe: a note is rewritten only when it changed.
+- Write your own thoughts **below the `%% Your notes below this line… %%` line** in any note; sync keeps them.
+- Deleting an entry in Life Note does not delete its note. `--full` re-pulls everything.
+
+**Run it every week.** Sign in once (`lifenote auth login`) on the machine that runs the job, then:
+
+*cron (Linux / macOS)*: `crontab -e`, add:
+
+```cron
+# Sundays 08:00. Use the full path from `which lifenote`.
+0 8 * * 0  /usr/local/bin/lifenote sync "$HOME/Obsidian/MyVault/Life Note" >> "$HOME/.lifenote-sync.log" 2>&1
+```
+
+*launchd (macOS)*: save as `~/Library/LaunchAgents/ai.mylifenote.sync.plist`, then `launchctl load ~/Library/LaunchAgents/ai.mylifenote.sync.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>ai.mylifenote.sync</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/lifenote</string>
+    <string>sync</string>
+    <string>/Users/YOU/Obsidian/MyVault/Life Note</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Weekday</key><integer>0</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key><string>/Users/YOU/.lifenote-sync.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/.lifenote-sync.log</string>
+</dict>
+</plist>
+```
+
+launchd runs a missed job when the Mac wakes; cron does not.
+
 ---
 
 ## Connect to your AI agent
@@ -252,7 +316,11 @@ When you connect through Claude Desktop or Claude Code, all of these become avai
 ```
 lifenote auth login | logout | whoami
 lifenote search <query> [--since 30d] [--limit 20] [--json]
-lifenote entries [--since 7d] [--limit 20]
+lifenote entries [--since 7d] [--until DATE] [--limit 20] [--with-responses]
+                 [--updated-since ISO] [--after-id N] [--all] [--json]
+lifenote export [--since] [--until] [--format md|json|csv] [--include-analysis]
+                [--include-mentors] [-o FILE]
+lifenote sync <folder> [--full]
 lifenote today | week
 lifenote conversations list | show <id>
 lifenote mcp                  # stdio MCP server entry point
