@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lifenote"
-version = "0.1.1"
+version = "0.2.0"
 description = "Bring your private journal into your AI agents — Claude Code, Cursor, Codex. MCP-compatible."
 readme = "README.md"
 license = { text = "MIT" }
@@ -32,7 +32,7 @@ Source = "https://github.com/dandanbang/lifenote-cli"
 Issues = "https://github.com/dandanbang/lifenote-cli/issues"
 
 [project.scripts]
-lifenote = "lifenote.cli:app"
+lifenote = "lifenote.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lifenote"]

@@ -2,14 +2,19 @@
 Token storage + device-flow login + automatic refresh.
 
 Storage precedence (read order):
-  1. LIFENOTE_API_TOKEN env var (for CI / Docker / headless agents)
-  2. OS keychain (macOS Keychain, Windows Cred Manager, Linux libsecret)
-     stores a JSON blob with {access, refresh, expires_at} so the CLI can
-     transparently refresh access tokens before they expire (Codex P2 #5).
+  1. LIFENOTE_TOKEN env var (then the older LIFENOTE_API_TOKEN), for cron,
+     CI, Docker and headless agents. Usually a personal access token.
+  2. A personal access token saved with `lifenote token create --save`
+     (OS keychain).
+  3. The device-login session (OS keychain): a JSON blob with
+     {access, refresh, expires_at} so the CLI can transparently refresh
+     access tokens before they expire (Codex P2 #5).
 
-Env-var path is essential: keyring fails or is unavailable in many headless
-environments (CI runners, Docker without secrets manager, sandboxed agents).
-Env-var mode skips refresh — the operator is expected to rotate it.
+The env-var path is essential: keyring fails or is unavailable in many
+headless environments (CI runners, Docker without secrets manager,
+sandboxed agents), and on some headless Linux boxes a keyring lookup
+blocks for ~25 s waiting on D-Bus. With the env var set, the keychain is
+never touched. Env-var mode skips refresh: a PAT does not need one.
 """
 import json
 import os
@@ -21,7 +26,8 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from .config import (
-    ENV_TOKEN_VAR, KEYRING_SERVICE, KEYRING_USERNAME, base_url,
+    ENV_TOKEN_VAR, ENV_TOKEN_VAR_LEGACY, KEYRING_PAT_USERNAME, KEYRING_SERVICE,
+    KEYRING_USERNAME, base_url,
 )
 
 # Refresh access token when it has fewer than this many seconds left
@@ -67,19 +73,58 @@ def store_credentials(access: str, refresh: str | None, expires_in: int | None) 
     _write_keyring_blob({'access': access, 'refresh': refresh, 'expires_at': expires_at})
 
 
+def token_source() -> tuple[str | None, str | None]:
+    """(token, where it came from) following the read order above."""
+    for var in (ENV_TOKEN_VAR, ENV_TOKEN_VAR_LEGACY):
+        env = (os.environ.get(var) or "").strip()
+        if env:
+            return env, f"env {var}"
+    pat = get_saved_pat()
+    if pat:
+        return pat, "keychain (personal access token)"
+    session = get_session_token()
+    if session:
+        return session, "keychain (sign-in)"
+    return None, None
+
+
 def get_token() -> str | None:
+    """The token to send: env var, else saved PAT, else the sign-in session."""
+    return token_source()[0]
+
+
+def get_saved_pat() -> str | None:
+    try:
+        import keyring
+        return keyring.get_password(KEYRING_SERVICE, KEYRING_PAT_USERNAME) or None
+    except Exception:
+        return None
+
+
+def save_pat(token: str) -> None:
+    import keyring
+    keyring.set_password(KEYRING_SERVICE, KEYRING_PAT_USERNAME, token)
+
+
+def clear_saved_pat() -> bool:
+    try:
+        import keyring
+        keyring.delete_password(KEYRING_SERVICE, KEYRING_PAT_USERNAME)
+        return True
+    except Exception:
+        return False
+
+
+def get_session_token() -> str | None:
     """
-    Env var first, keyring second. If the keyring blob has a refresh token
-    and the access is near expiry, transparently refreshes (with a
-    cross-process file lock so two CLIs/MCP-proxies running concurrently
-    don't both rotate the same refresh token and trigger family-burn —
-    Codex round 3 P2 #4).
+    The device-login session only (never an env var or a PAT): managing
+    tokens needs it. If the keyring blob has a refresh token and the access
+    is near expiry, transparently refreshes (with a cross-process file lock
+    so two CLIs/MCP-proxies running concurrently don't both rotate the same
+    refresh token and trigger family-burn — Codex round 3 P2 #4).
 
     Returns the access token or None.
     """
-    env = os.environ.get(ENV_TOKEN_VAR)
-    if env:
-        return env.strip()
     blob = _read_keyring_blob()
     if not blob:
         return None

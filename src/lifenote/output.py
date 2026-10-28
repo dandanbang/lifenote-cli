@@ -5,6 +5,7 @@ from rich.console import Console
 from rich.table import Table
 
 console = Console()
+err_console = Console(stderr=True)
 
 
 def emit(payload, json_mode: bool):
@@ -21,7 +22,7 @@ def emit(payload, json_mode: bool):
         _print_conversations(payload)
     elif isinstance(payload, dict) and "messages" in payload:
         _print_conversation(payload)
-    elif isinstance(payload, dict) and "tokens" in payload:
+    elif isinstance(payload, dict) and "personal_access_tokens" in payload:
         _print_tokens(payload)
     else:
         console.print(payload)
@@ -85,13 +86,16 @@ def _print_tokens(p):
     t = Table(show_header=True, header_style="bold", box=None)
     t.add_column("ID")
     t.add_column("Name")
-    t.add_column("Kind")
     t.add_column("Last used")
+    t.add_column("Expires")
     t.add_column("Status")
-    for tok in p["tokens"]:
+    colours = {"active": "green", "expired": "yellow", "revoked": "red"}
+    for tok in p["personal_access_tokens"]:
+        status = tok.get("status") or "?"
         t.add_row(
-            str(tok["id"]), tok["name"], tok["client_kind"],
+            str(tok["id"]), tok["name"],
             (tok.get("last_used_at") or "never")[:16],
-            "[green]active[/]" if tok["active"] else "[red]revoked[/]",
+            (tok.get("expires_at") or "")[:10],
+            f"[{colours.get(status, 'white')}]{status}[/]",
         )
     console.print(t)

@@ -24,8 +24,8 @@ class APIError(Exception):
         super().__init__(f"{status}: {body}")
 
 
-def _client(timeout: float = 30.0) -> httpx.Client:
-    token = get_token()
+def _client(timeout: float = 30.0, token: str | None = None) -> httpx.Client:
+    token = token or get_token()
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     headers["User-Agent"] = USER_AGENT
     return httpx.Client(base_url=base_url(), headers=headers, timeout=timeout)
@@ -51,8 +51,9 @@ def _is_minute_limit(r: httpx.Response) -> bool:
 class Session:
     """One connection (and one token lookup) for a run of many requests."""
 
-    def __init__(self, client: httpx.Client | None = None, sleep=time.sleep):
-        self._c = client or _client()
+    def __init__(self, client: httpx.Client | None = None, sleep=time.sleep,
+                 token: str | None = None):
+        self._c = client or _client(token=token)
         self._sleep = sleep
 
     def __enter__(self):
@@ -105,9 +106,17 @@ def get(path: str, params: dict | None = None) -> dict:
         return s.get(path, params=params)
 
 
-def delete(path: str) -> dict:
-    with _client() as c:
+def delete(path: str, token: str | None = None) -> dict:
+    with _client(token=token) as c:
         r = c.delete(path)
     if r.status_code not in (200, 204):
         _raise_for(r)
     return {} if r.status_code == 204 else r.json()
+
+
+def post(path: str, body: dict, token: str | None = None) -> dict:
+    with _client(token=token) as c:
+        r = c.post(path, json=body)
+    if r.status_code not in (200, 201):
+        _raise_for(r)
+    return r.json()

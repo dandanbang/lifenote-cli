@@ -61,7 +61,36 @@ lifenote auth login
 
 Browser opens, you click **Allow**, you're done. Your token is stored in your OS keychain (macOS Keychain / Windows Credential Manager / Linux libsecret) — never in plaintext.
 
-For CI / Docker / headless agents, set `LIFENOTE_API_TOKEN` instead.
+### Unattended jobs: personal access tokens
+
+A sign-in refreshes itself while you use it, but a weekly cron job needs something that just works. After `lifenote auth login`, create a **personal access token**:
+
+```bash
+lifenote token create --name "weekly obsidian sync" --expires 90d   # 30d | 90d | 365d
+```
+
+- It's **read-only**, and it is shown **once**. Life Note stores only a hash of it.
+- Use it with `export LIFENOTE_TOKEN=ln_pat_…` (cron, CI, Docker). With that set, the CLI never touches the keychain. Or add `--save` to keep it in this machine's keychain as the default.
+- `lifenote token list` shows each token's last use and expiry. `lifenote token revoke <id>` kills one at once.
+- A token can't create or revoke tokens. Requesting account deletion revokes them all.
+
+Check what this machine will use:
+
+```bash
+lifenote auth status     # who, which token, where it came from, days left
+```
+
+### Exit codes
+
+| code | meaning |
+|---|---|
+| 0 | ok |
+| 2 | usage: bad flag or value, or Life Note rejected the request as invalid |
+| 3 | auth: not signed in, or the token is expired, revoked, or invalid |
+| 4 | network: couldn't reach Life Note |
+| 5 | server: Life Note returned an error, or rate-limited you |
+
+Every failure prints one plain line to stderr.
 
 ---
 
@@ -113,14 +142,17 @@ lifenote sync ~/Obsidian/MyVault/"Life Note"
 - Write your own thoughts **below the `%% Your notes below this line… %%` line** in any note; sync keeps them.
 - Deleting an entry in Life Note does not delete its note. `--full` re-pulls everything.
 
-**Run it every week.** Sign in once (`lifenote auth login`) on the machine that runs the job, then:
+**Run it every week.** Make a token once (`lifenote auth login`, then `lifenote token create --name "weekly obsidian sync" --expires 365d`), then:
 
 *cron (Linux / macOS)*: `crontab -e`, add:
 
 ```cron
 # Sundays 08:00. Use the full path from `which lifenote`.
+LIFENOTE_TOKEN=ln_pat_paste_yours_here
 0 8 * * 0  /usr/local/bin/lifenote sync "$HOME/Obsidian/MyVault/Life Note" >> "$HOME/.lifenote-sync.log" 2>&1
 ```
+
+Exit code 3 in the log means the token expired or was revoked: make a new one.
 
 *launchd (macOS)*: save as `~/Library/LaunchAgents/ai.mylifenote.sync.plist`, then `launchctl load ~/Library/LaunchAgents/ai.mylifenote.sync.plist`:
 
@@ -136,6 +168,8 @@ lifenote sync ~/Obsidian/MyVault/"Life Note"
     <string>sync</string>
     <string>/Users/YOU/Obsidian/MyVault/Life Note</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>LIFENOTE_TOKEN</key><string>ln_pat_paste_yours_here</string></dict>
   <key>StartCalendarInterval</key>
   <dict><key>Weekday</key><integer>0</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
   <key>StandardOutPath</key><string>/Users/YOU/.lifenote-sync.log</string>
@@ -314,7 +348,9 @@ When you connect through Claude Desktop or Claude Code, all of these become avai
 ## CLI command reference
 
 ```
-lifenote auth login | logout | whoami
+lifenote auth login | logout | whoami | status
+lifenote token create --name NAME [--expires 30d|90d|365d] [--save]
+lifenote token list | revoke <id>
 lifenote search <query> [--since 30d] [--limit 20] [--json]
 lifenote entries [--since 7d] [--until DATE] [--limit 20] [--with-responses]
                  [--updated-since ISO] [--after-id N] [--all] [--json]
@@ -334,7 +370,7 @@ lifenote version
 
 Environment variables (all optional):
 
-- `LIFENOTE_API_TOKEN` — bypass keychain (essential for CI / Docker)
+- `LIFENOTE_TOKEN` — a personal access token; bypasses the keychain (cron, CI, Docker). `LIFENOTE_API_TOKEN` still works.
 - `LIFENOTE_BASE_URL` — point at staging / dev (default: `https://www.mylifenote.ai`)
 
 ---

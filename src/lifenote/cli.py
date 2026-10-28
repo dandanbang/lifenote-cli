@@ -2,7 +2,8 @@
 lifenote CLI — typer entry point.
 
 Commands:
-  auth login | logout | whoami
+  auth login | logout | whoami | status
+  token create | list | revoke   # personal access tokens for cron / CI
   search <query>
   entries [--since] [--until] [--limit] [--with-responses]
           [--updated-since] [--after-id] [--all]
@@ -20,9 +21,19 @@ from pathlib import Path
 import typer
 
 from . import __version__
-from .api import APIError, Session, get
-from .auth import device_login, store_credentials, clear_token, get_token
-from .output import console, emit
+from datetime import datetime, timezone
+
+import httpx
+
+from .api import APIError, Session, delete, get, post
+from .auth import (
+    clear_saved_pat, clear_token, device_login, get_session_token, save_pat,
+    store_credentials, token_source,
+)
+from .config import (
+    ENV_TOKEN_VAR, EXIT_AUTH, EXIT_NETWORK, EXIT_SERVER, EXIT_USAGE,
+)
+from .output import console, emit, err_console
 
 app = typer.Typer(
     add_completion=False,
@@ -34,21 +45,75 @@ app = typer.Typer(
 auth_app = typer.Typer(no_args_is_help=True, help="Sign in, sign out, who am I.")
 conv_app = typer.Typer(no_args_is_help=True, help="Past mentor conversations.")
 skills_app = typer.Typer(no_args_is_help=True, help="Bundled agent skills.")
+token_app = typer.Typer(no_args_is_help=True,
+                        help="Personal access tokens for unattended jobs (cron, CI).")
+
+
+def _print_version(value: bool):
+    if value:
+        console.print(f"lifenote {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _root(
+    version: bool = typer.Option(False, "--version", callback=_print_version, is_eager=True,
+                                 help="Print the CLI version and exit."),
+):
+    """Bring your private journal into your AI agents."""
+
+
 app.add_typer(auth_app, name="auth")
+app.add_typer(token_app, name="token")
 app.add_typer(conv_app, name="conversations")
 app.add_typer(skills_app, name="skills")
 
 
+AUTH_HELP = (f"Run `lifenote auth login`, or set {ENV_TOKEN_VAR} to a fresh token "
+             "(`lifenote token create`).")
+
+
+def _fail(code: int, message: str):
+    """One human line on stderr, then a documented exit code."""
+    err_console.print(message, highlight=False, soft_wrap=True)
+    raise typer.Exit(code)
+
+
+def _detail(body) -> str:
+    if isinstance(body, dict):
+        return str(body.get("detail") or body.get("reason") or body.get("error") or body)
+    return str(body)[:200]
+
+
 def _handle_api_error(e: APIError) -> None:
+    error = e.body.get("error") if isinstance(e.body, dict) else None
     if e.status == 401:
-        console.print("[red]Not signed in.[/] Run [bold]lifenote auth login[/].")
-    elif e.status == 403:
-        console.print(f"[red]Permission denied:[/] {e.body}")
-    elif e.status == 429:
-        console.print(f"[yellow]Rate limited:[/] {e.body}")
-    else:
-        console.print(f"[red]API error {e.status}:[/] {e.body}")
-    raise typer.Exit(1)
+        _fail(EXIT_AUTH, f"[red]Your Life Note token is expired, revoked, or invalid.[/] {AUTH_HELP}")
+    if e.status == 403 and error == "pat_cannot_manage_tokens":
+        _fail(EXIT_AUTH, "[red]A personal access token cannot manage tokens.[/] "
+                         "Run `lifenote auth login` on this machine first.")
+    if e.status == 403:
+        _fail(EXIT_AUTH, f"[red]This token is not allowed to do that:[/] {_detail(e.body)}")
+    if e.status == 429:
+        _fail(EXIT_SERVER, f"[yellow]Rate limited by Life Note:[/] {_detail(e.body)}. Try again later.")
+    if e.status in (400, 404, 409, 422):
+        _fail(EXIT_USAGE, f"[red]Life Note rejected the request:[/] {_detail(e.body)}")
+    _fail(EXIT_SERVER, f"[red]Life Note server error {e.status}.[/] Try again in a few minutes.")
+
+
+def _require_token() -> None:
+    if not token_source()[0]:
+        _fail(EXIT_AUTH, f"[red]Not signed in.[/] {AUTH_HELP}")
+
+
+def main():
+    """Console entry point: maps network failures to their exit code."""
+    try:
+        app()
+    except httpx.TransportError as e:
+        err_console.print(f"[red]Can't reach Life Note[/] ({type(e).__name__}). "
+                          "Check your connection and try again.", highlight=False)
+        sys.exit(EXIT_NETWORK)
 
 
 # ---------------------------------------------------------------------------
@@ -64,8 +129,7 @@ def auth_login(
     try:
         result = device_login(name=name, open_browser=not no_browser)
     except RuntimeError as e:
-        console.print(f"[red]Login failed:[/] {e}")
-        raise typer.Exit(1)
+        _fail(EXIT_AUTH, f"[red]Login failed:[/] {e}")
     # Store full credentials so the CLI can transparently refresh when the
     # 1-hour access token nears expiry. (Codex P2 #5)
     store_credentials(
@@ -78,9 +142,12 @@ def auth_login(
 
 @auth_app.command("logout")
 def auth_logout():
-    """Forget the stored token (does not revoke it server-side)."""
-    if clear_token():
-        console.print("[green]Signed out.[/] To revoke server-side, visit Settings → Connected Agents.")
+    """Forget the stored sign-in and saved token (does not revoke them server-side)."""
+    cleared = clear_token()
+    cleared = clear_saved_pat() or cleared
+    if cleared:
+        console.print("[green]Signed out.[/] To revoke server-side, use `lifenote token revoke` "
+                      "or Settings → Connected Agents.")
     else:
         console.print("[dim]No stored token.[/]")
 
@@ -88,13 +155,135 @@ def auth_logout():
 @auth_app.command("whoami")
 def auth_whoami(json: bool = typer.Option(False, "--json")):
     """Show who you're signed in as."""
-    if not get_token():
-        console.print("[red]Not signed in.[/] Run [bold]lifenote auth login[/].")
-        raise typer.Exit(1)
+    _require_token()
     try:
         emit(get("/api/agent/v1/whoami"), json)
     except APIError as e:
         _handle_api_error(e)
+
+
+def _days_left(expires_at: str | None) -> int | None:
+    if not expires_at:
+        return None
+    try:
+        exp = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    return (exp - datetime.now(timezone.utc)).days
+
+
+@auth_app.command("status")
+def auth_status(json: bool = typer.Option(False, "--json")):
+    """Check the token this machine would use: where it comes from, whose it is, when it expires.
+
+    Exit 0 if it works, 3 if missing/expired/revoked, 4 if Life Note can't be reached.
+    """
+    token, source = token_source()
+    if not token:
+        _fail(EXIT_AUTH, f"[red]Not signed in.[/] {AUTH_HELP}")
+    try:
+        who = get("/api/agent/v1/whoami")
+    except APIError as e:
+        _handle_api_error(e)
+    status = {
+        "ok": True,
+        "source": source,
+        "email": who.get("email"),
+        "token_name": who.get("token_name"),
+        "token_kind": who.get("token_kind"),
+        "scopes": who.get("scopes"),
+        "expires_at": who.get("expires_at"),
+    }
+    if json:
+        emit(status, True)
+        return
+    kind = "personal access token" if who.get("token_kind") == "personal_access_token" else "sign-in"
+    console.print(f"[green]OK[/] {who.get('email')} · {kind} [bold]{who.get('token_name')}[/] · from {source}",
+                  highlight=False, soft_wrap=True)
+    if who.get("token_kind") == "personal_access_token":
+        days = _days_left(who.get("expires_at"))
+        if days is not None:
+            colour = "yellow" if days < 14 else "dim"
+            console.print(f"[{colour}]Expires {who['expires_at'][:10]} ({days} days left).[/]")
+    console.print(f"[dim]Scopes: {', '.join(who.get('scopes') or [])}[/]")
+
+
+# ---------------------------------------------------------------------------
+# token — personal access tokens
+# ---------------------------------------------------------------------------
+
+def _session_or_fail() -> str:
+    token = get_session_token()
+    if not token:
+        _fail(EXIT_AUTH, "[red]Token commands need an interactive sign-in on this machine.[/] "
+                         "Run `lifenote auth login` first.")
+    return token
+
+
+@token_app.command("create")
+def token_create(
+    name: str = typer.Option(..., "--name", help="What it's for, e.g. 'weekly obsidian sync'."),
+    expires: str = typer.Option("90d", "--expires", help="30d, 90d, or 365d."),
+    save: bool = typer.Option(False, "--save",
+                              help="Also store it in this machine's keychain as the default token."),
+    json: bool = typer.Option(False, "--json"),
+):
+    """Create a read-only personal access token. It is shown ONCE."""
+    if expires not in ("30d", "90d", "365d"):
+        _fail(EXIT_USAGE, "[red]--expires must be 30d, 90d, or 365d.[/]")
+    session = _session_or_fail()
+    try:
+        created = post("/api/agent/v1/tokens",
+                       {"name": name, "expires_in_days": int(expires[:-1])}, token=session)
+    except APIError as e:
+        _handle_api_error(e)
+    # Show it before anything else can fail: the server already minted it.
+    if json:
+        emit(created, True)
+    else:
+        console.print(f"[green]Created[/] token [bold]{created['name']}[/] (id {created['id']}), "
+                      f"read-only, expires {created['expires_at'][:10]}.", highlight=False)
+        console.print("\nCopy it now; it will not be shown again:\n")
+        print(created["token"], flush=True)
+        console.print(f"\nFor cron / CI:  export {ENV_TOKEN_VAR}=<the token above>", highlight=False)
+    if save:
+        try:
+            save_pat(created["token"])
+        except Exception as e:
+            err_console.print(f"[yellow]Couldn't save it to the keychain ({type(e).__name__}).[/] "
+                              f"Use {ENV_TOKEN_VAR} instead.", highlight=False)
+        else:
+            if not json:
+                console.print("[dim]Saved to this machine's keychain as the default token.[/]")
+
+
+@token_app.command("list")
+def token_list(json: bool = typer.Option(False, "--json")):
+    """Your personal access tokens: name, last used, expiry, status."""
+    session = _session_or_fail()
+    try:
+        body = get_with(session, "/api/agent/v1/tokens")
+    except APIError as e:
+        _handle_api_error(e)
+    emit(body, json)
+
+
+@token_app.command("revoke")
+def token_revoke(token_id: int = typer.Argument(..., help="The id from `lifenote token list`.")):
+    """Revoke a personal access token. Anything using it stops working at once."""
+    session = _session_or_fail()
+    try:
+        delete(f"/api/agent/v1/tokens/{token_id}", token=session)
+    except APIError as e:
+        _handle_api_error(e)
+    console.print(f"[green]Revoked[/] token {token_id}.")
+
+
+def get_with(token: str, path: str, params: dict | None = None) -> dict:
+    with Session(token=token) as s:
+        return s.get(path, params=params)
 
 
 # ---------------------------------------------------------------------------
@@ -188,8 +377,7 @@ def export(
     from .render import export_csv, export_json, export_md
     renderers = {"md": export_md, "json": export_json, "csv": export_csv}
     if fmt not in renderers:
-        console.print(f"[red]Unknown --format {fmt!r}.[/] Use md, json, or csv.")
-        raise typer.Exit(2)
+        _fail(EXIT_USAGE, f"[red]Unknown --format {fmt!r}.[/] Use md, json, or csv.")
     params: dict = {}
     if since:
         params["since"] = since
@@ -301,10 +489,10 @@ def mcp():
       { "mcpServers": { "lifenote": { "command": "lifenote", "args": ["mcp"] } } }
     """
     from .mcp_proxy import run as run_mcp
-    if not get_token():
+    if not token_source()[0]:
         # MCP clients see stderr in their logs
         sys.stderr.write("lifenote: not signed in. Run `lifenote auth login` first.\n")
-        sys.exit(1)
+        sys.exit(EXIT_AUTH)
     run_mcp()
 
 
@@ -332,4 +520,4 @@ def version():
 
 
 if __name__ == "__main__":
-    app()
+    main()
