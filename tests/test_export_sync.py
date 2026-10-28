@@ -144,11 +144,11 @@ class SyncTests(unittest.TestCase):
 
     def test_first_run_pulls_everything_then_reruns_are_idempotent(self):
         s = FakeSession([entry(1), entry(2, date="2026-10-02 10:00:00")])
-        self.assertEqual(sync.sync(self.dir, s), {"new": 2, "updated": 0, "unchanged": 0})
+        self.assertEqual(sync.sync(self.dir, s), {"new": 2, "updated": 0, "unchanged": 0, "skipped": 0})
         self.assertEqual(s.calls[0], {"with_responses": 1, "after_id": 0})
         self.assertTrue((self.dir / "2026/2026-10-02-2.md").exists())
         before = self._read("2026/2026-10-01-1.md")
-        self.assertEqual(sync.sync(self.dir, s, full=True), {"new": 0, "updated": 0, "unchanged": 2})
+        self.assertEqual(sync.sync(self.dir, s, full=True), {"new": 0, "updated": 0, "unchanged": 2, "skipped": 0})
         self.assertEqual(self._read("2026/2026-10-01-1.md"), before)
 
     def test_next_run_asks_for_changes_since_the_cursor_minus_overlap(self):
@@ -165,14 +165,42 @@ class SyncTests(unittest.TestCase):
         path.write_text(path.read_text(encoding="utf-8") + "my own note\n", encoding="utf-8")
         changed = entry(1, "second draft", replies=[("Rumi", "a late reply")])
         self.assertEqual(sync.sync(self.dir, FakeSession([changed])),
-                         {"new": 0, "updated": 1, "unchanged": 0})
+                         {"new": 0, "updated": 1, "unchanged": 0, "skipped": 0})
         text = path.read_text(encoding="utf-8")
         self.assertIn("second draft", text)
         self.assertIn("> [!note] Rumi", text)
         self.assertNotIn("first draft", text)
         self.assertTrue(text.endswith(sync.KEEP_MARKER + "\nmy own note\n"))
         self.assertEqual(sync.sync(self.dir, FakeSession([changed])),
-                         {"new": 0, "updated": 0, "unchanged": 1})
+                         {"new": 0, "updated": 0, "unchanged": 1, "skipped": 0})
+
+    def test_an_entry_without_its_text_never_blanks_a_note_or_moves_the_cursor(self):
+        sync.sync(self.dir, FakeSession([entry(1, "kept words")], as_of="2026-10-01T00:00:00Z"))
+        broken = entry(1)
+        broken["content"] = broken["content_text"] = None
+        stats = sync.sync(self.dir, FakeSession([broken], as_of="2026-10-28T00:00:00Z"))
+        self.assertEqual(stats["skipped"], 1)
+        self.assertIn("kept words", self._read("2026/2026-10-01-1.md"))
+        self.assertEqual(json.loads(self._read(sync.CURSOR_FILE))["as_of"], "2026-10-01T00:00:00Z")
+
+    def test_never_writes_or_moves_files_outside_the_folder(self):
+        outside = self.dir.parent / f"outside-{self.dir.name}"
+        outside.mkdir()
+        secret = outside / "id_rsa"
+        secret.write_text("secret")
+        vault = self.dir / "vault"
+        sync.sync(vault, FakeSession([entry(1)]))
+        state = json.loads((vault / sync.CURSOR_FILE).read_text())
+        state["files"]["1"] = f"../../{outside.name}/id_rsa"   # a tampered cursor
+        (vault / sync.CURSOR_FILE).write_text(json.dumps(state))
+        hostile = [entry(1, date="2026-10-02 09:00:00"),
+                   entry(2, date="../../../tmp/x"), entry(3, date="/etc/passwd")]
+        sync.sync(vault, FakeSession(hostile))
+        self.assertEqual(secret.read_text(), "secret")
+        self.assertTrue((vault / "undated/2.md").exists())
+        self.assertTrue((vault / "undated/3.md").exists())
+        for p in vault.rglob("*"):
+            self.assertTrue(p.resolve().is_relative_to(vault.resolve()), p)
 
     def test_an_entry_whose_date_changed_moves_its_note(self):
         sync.sync(self.dir, FakeSession([entry(1, date="2026-10-01 09:00:00")]))

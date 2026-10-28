@@ -220,6 +220,9 @@ def sync(
     console.print(
         f"[green]Synced[/] {stats['new']} new, {stats['updated']} updated, "
         f"{stats['unchanged']} unchanged → {folder}", highlight=False, soft_wrap=True)
+    if stats["skipped"]:
+        console.print(f"[yellow]Skipped {stats['skipped']} entries that arrived incomplete; "
+                      "the next run retries them.[/]")
 
 
 @app.command()

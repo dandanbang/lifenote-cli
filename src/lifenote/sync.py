@@ -8,9 +8,13 @@
 - Idempotent: a note is rewritten only when its bytes would change.
 - Anything you write below the "your notes" line of a note is kept.
 - Deleting an entry in Life Note does not delete its note here.
+- Never writes outside the folder, and never replaces a note with an empty
+  one: an entry that arrives without its text is skipped, and the cursor
+  stays put so the next run retries it.
 """
 import json
 import os
+import re
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,9 +27,22 @@ OVERLAP = timedelta(days=2)
 KEEP_MARKER = "%% Your notes below this line are kept by lifenote sync %%"
 
 
+_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
 def note_path(entry) -> str:
-    day = str(entry.get("date") or "")[:10] or "undated"
+    day = str(entry.get("date") or "")[:10]
+    if not _DAY.fullmatch(day):
+        return f"undated/{int(entry['id'])}.md"
     return f"{day[:4]}/{day}-{int(entry['id'])}.md"
+
+
+def _inside(folder: Path, rel) -> Path | None:
+    """folder/rel if it stays inside folder (rel may come from a JSON file), else None."""
+    if not isinstance(rel, str) or not rel:
+        return None
+    path = (folder / rel).resolve()
+    return path if path.is_relative_to(folder.resolve()) else None
 
 
 def _write_atomic(path: Path, text: str) -> None:
@@ -58,7 +75,7 @@ def _with_kept_tail(text: str, existing: str | None) -> str:
 
 
 def sync(folder, session, full: bool = False) -> dict:
-    """Pull changes into `folder`. Returns counts: new / updated / unchanged."""
+    """Pull changes into `folder`. Returns counts: new / updated / unchanged / skipped."""
     folder = Path(folder).expanduser()
     folder.mkdir(parents=True, exist_ok=True)
     state = _load_state(folder)
@@ -71,17 +88,23 @@ def sync(folder, session, full: bool = False) -> dict:
         params = {"with_responses": 1,
                   "updated_since": since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
 
-    stats = {"new": 0, "updated": 0, "unchanged": 0}
+    stats = {"new": 0, "updated": 0, "unchanged": 0, "skipped": 0}
     meta: dict = {}
     for entry in session.iter_entries(params, meta=meta):
         key = str(int(entry["id"]))
+        if entry.get("content_text") is None and entry.get("content") is None:
+            stats["skipped"] += 1
+            continue
         rel = note_path(entry)
-        path = folder / rel
-        old_rel = files.get(key)
-        if old_rel and old_rel != rel and (folder / old_rel).exists() and not path.exists():
+        path = _inside(folder, rel)
+        if path is None:
+            stats["skipped"] += 1
+            continue
+        old_path = _inside(folder, files.get(key))
+        if old_path and old_path != path and old_path.exists() and not path.exists():
             # The entry's date changed: move the note (and the user's tail) with it.
             path.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(folder / old_rel, path)
+            os.replace(old_path, path)
         existing = path.read_text(encoding="utf-8") if path.exists() else None
         text = _with_kept_tail(obsidian_note(entry), existing)
         if existing == text:
@@ -94,10 +117,11 @@ def sync(folder, session, full: bool = False) -> dict:
     # The cursor is the instant the run STARTED reading, so anything that
     # changed mid-run is picked up next time. Saved only after a full pass:
     # an interrupted run simply redoes its window.
+    as_of = state.get("as_of") if stats["skipped"] else (meta.get("as_of") or state.get("as_of"))
     state = {
         "version": 1,
         "base_url": base_url(),
-        "as_of": meta.get("as_of") or state.get("as_of"),
+        "as_of": as_of,
         "files": dict(sorted(files.items(), key=lambda kv: int(kv[0]))),
     }
     _write_atomic(folder / CURSOR_FILE, json.dumps(state, indent=2) + "\n")
