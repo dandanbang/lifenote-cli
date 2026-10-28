@@ -18,6 +18,7 @@ import sys
 import httpx
 
 from .auth import get_token, _refresh_with_lock, _read_keyring_blob
+from .api import USER_AGENT
 from .config import base_url
 
 
@@ -33,7 +34,7 @@ def run() -> None:
         return {
             "Authorization": f"Bearer {get_token() or ''}",
             "Content-Type": "application/json",
-            "User-Agent": "lifenote-cli/0.1.1 (mcp_proxy)",
+            "User-Agent": f"{USER_AGENT} (mcp_proxy)",
         }
 
     def post_once(line: str, sid: str | None) -> httpx.Response:
