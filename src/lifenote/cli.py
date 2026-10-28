@@ -47,6 +47,22 @@ conv_app = typer.Typer(no_args_is_help=True, help="Past mentor conversations.")
 skills_app = typer.Typer(no_args_is_help=True, help="Bundled agent skills.")
 token_app = typer.Typer(no_args_is_help=True,
                         help="Personal access tokens for unattended jobs (cron, CI).")
+
+
+def _print_version(value: bool):
+    if value:
+        console.print(f"lifenote {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _root(
+    version: bool = typer.Option(False, "--version", callback=_print_version, is_eager=True,
+                                 help="Print the CLI version and exit."),
+):
+    """Bring your private journal into your AI agents."""
+
+
 app.add_typer(auth_app, name="auth")
 app.add_typer(token_app, name="token")
 app.add_typer(conv_app, name="conversations")
