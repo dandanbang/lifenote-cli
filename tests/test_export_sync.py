@@ -27,15 +27,17 @@ def entry(eid, text="hello", date="2026-10-01 09:00:00", replies=(), analysis=No
 class FakeSession:
     """Stands in for api.Session: records params, serves a fixed list."""
 
-    def __init__(self, entries, as_of="2026-10-28T00:00:00Z"):
+    def __init__(self, entries, as_of="2026-10-28T00:00:00Z", reply_cursor=50):
         self.entries = entries
         self.as_of = as_of
+        self.reply_cursor = reply_cursor
         self.calls = []
 
     def iter_entries(self, params, page_size=100, meta=None):
         self.calls.append(dict(params))
         if meta is not None:
             meta.setdefault("as_of", self.as_of)
+            meta.setdefault("reply_cursor", self.reply_cursor)
         yield from self.entries
 
 
@@ -151,13 +153,15 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(sync.sync(self.dir, s, full=True), {"new": 0, "updated": 0, "unchanged": 2, "skipped": 0})
         self.assertEqual(self._read("2026/2026-10-01-1.md"), before)
 
-    def test_next_run_asks_for_changes_since_the_cursor_minus_overlap(self):
-        sync.sync(self.dir, FakeSession([entry(1)], as_of="2026-10-28T00:00:00Z"))
-        s = FakeSession([])
+    def test_next_run_asks_for_edits_since_the_cursor_and_replies_after_the_reply_cursor(self):
+        sync.sync(self.dir, FakeSession([entry(1)], as_of="2026-10-28T00:00:00Z", reply_cursor=41))
+        s = FakeSession([], reply_cursor=57)
         sync.sync(self.dir, s)
-        self.assertEqual(s.calls[0], {"with_responses": 1, "updated_since": "2026-10-26T00:00:00Z"})
+        self.assertEqual(s.calls[0], {"with_responses": 1, "updated_since": "2026-10-26T00:00:00Z",
+                                      "reply_after_id": 41})
         state = json.loads(self._read(sync.CURSOR_FILE))
         self.assertEqual(state["files"], {"1": "2026/2026-10-01-1.md"})
+        self.assertEqual(state["reply_cursor"], 57)
 
     def test_an_edit_and_a_new_reply_rewrite_the_note_and_keep_the_users_tail(self):
         sync.sync(self.dir, FakeSession([entry(1, "first draft")]))

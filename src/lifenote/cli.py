@@ -128,14 +128,23 @@ def entries(
         help="Add Daily Insights (analysis) and mentor replies to each entry."),
     updated_since: str | None = typer.Option(
         None, "--updated-since",
-        help="Only entries written, edited, or given a new mentor reply since "
-             "this ISO time (e.g. 2026-10-20T00:00:00Z). Oldest change first."),
+        help="Only entries written or edited since this ISO time "
+             "(e.g. 2026-10-20T00:00:00Z), plus their same-day entries. "
+             "Oldest change first. Add --reply-after-id to catch new mentor replies."),
     after_id: int | None = typer.Option(
         None, "--after-id", help="Only entries with a higher id. Lowest id first."),
+    reply_after_id: int | None = typer.Option(
+        None, "--reply-after-id",
+        help="Also entries that got a mentor reply newer than this reply id "
+             "(the `reply_cursor` from a previous --json run)."),
     all_pages: bool = typer.Option(False, "--all", help="Fetch every page, not just one."),
     json: bool = typer.Option(False, "--json"),
 ):
-    """List journal entries. --json output carries `as_of`: pass it as --updated-since next time."""
+    """List journal entries.
+
+    For incremental pulls, --json output carries `as_of` and `reply_cursor`:
+    pass them as --updated-since and --reply-after-id next time.
+    """
     params: dict = {"limit": limit}
     if since:
         params["since"] = since
@@ -147,12 +156,15 @@ def entries(
         params["updated_since"] = updated_since
     if after_id is not None:
         params["after_id"] = after_id
+    if reply_after_id is not None:
+        params["reply_after_id"] = reply_after_id
     try:
         with Session() as s:
             if all_pages:
                 meta: dict = {}
                 rows = list(s.iter_entries(params, page_size=max(1, min(100, limit)), meta=meta))
-                payload = {"entries": rows, "count": len(rows), "as_of": meta.get("as_of")}
+                payload = {"entries": rows, "count": len(rows), "as_of": meta.get("as_of"),
+                           "reply_cursor": meta.get("reply_cursor")}
             else:
                 payload = s.get("/api/agent/v1/entries", params=params)
         emit(payload, json)

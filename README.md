@@ -86,11 +86,11 @@ lifenote search "burnout" --json | claude "summarize the patterns"
 
 ```bash
 lifenote entries --since 7d --with-responses --json      # analysis + every mentor reply per entry
-lifenote entries --updated-since 2026-10-20T00:00:00Z --all --json   # only what changed
+lifenote entries --updated-since 2026-10-20T00:00:00Z --reply-after-id 98765 --all --json   # only what changed
 lifenote entries --after-id 12345 --all --json           # only entries newer than id 12345
 ```
 
-`--updated-since` returns entries that were written, **edited**, or got a **new mentor reply** since that time, oldest change first. Every `--json` result carries `as_of`; pass it back as `--updated-since` next time.
+`--updated-since` returns entries written or **edited** since that time, plus the other entries on those days, because a day's Daily Insight is shared and gets refreshed. `--reply-after-id` adds entries that got a **new mentor reply**. Every `--json` result carries `as_of` and `reply_cursor`: pass them back next time. `lifenote sync` does this for you.
 
 ### Export
 
@@ -108,7 +108,7 @@ lifenote export --since 30d --format json --include-analysis
 lifenote sync ~/Obsidian/MyVault/"Life Note"
 ```
 
-- The first run pulls everything. Later runs fetch only entries written, edited, or given a new mentor reply since the last run. The cursor lives in the folder (`.lifenote-sync.json`).
+- The first run pulls everything. Later runs fetch only entries written, edited, or given a new mentor reply since the last run, and refresh Daily Insights for those days. The cursor lives in the folder (`.lifenote-sync.json`).
 - Re-running is safe: a note is rewritten only when it changed.
 - Write your own thoughts **below the `%% Your notes below this line… %%` line** in any note; sync keeps them.
 - Deleting an entry in Life Note does not delete its note. `--full` re-pulls everything.

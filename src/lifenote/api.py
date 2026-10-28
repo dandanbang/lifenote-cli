@@ -78,7 +78,7 @@ class Session:
 
         With after_id the next page continues from the last id seen;
         otherwise it uses offset. Stops when the server says has_more=false.
-        `meta["as_of"]` gets the first page's as_of: the instant to resume from.
+        `meta` gets the first page's as_of and reply_cursor: where to resume.
         """
         params = {**params, "limit": page_size}
         offset = 0
@@ -89,6 +89,7 @@ class Session:
             body = self.get("/api/agent/v1/entries", params=page_params)
             if meta is not None:
                 meta.setdefault("as_of", body.get("as_of"))
+                meta.setdefault("reply_cursor", body.get("reply_cursor"))
             entries = body.get("entries") or []
             yield from entries
             if not body.get("has_more") or not entries:

@@ -1,8 +1,9 @@
 """`lifenote sync <folder>`: one Markdown note per entry, Obsidian-ready.
 
 - The first run pulls every entry (by id). Later runs ask only for entries
-  written, edited, or given a new mentor reply since the last run, with a
-  2-day overlap so a reply stamped in another timezone is never missed.
+  written or edited since the last run (2-day overlap, so a Daily Insight
+  refreshed just after an edit is picked up), plus entries with a mentor
+  reply newer than the last reply seen (reply ids, which never go back).
 - The cursor lives in the folder (`.lifenote-sync.json`), so the job needs
   no other state, and two folders sync independently.
 - Idempotent: a note is rewritten only when its bytes would change.
@@ -87,6 +88,8 @@ def sync(folder, session, full: bool = False) -> dict:
         since = datetime.fromisoformat(state["as_of"].replace("Z", "+00:00")) - OVERLAP
         params = {"with_responses": 1,
                   "updated_since": since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        if state.get("reply_cursor") is not None:
+            params["reply_after_id"] = int(state["reply_cursor"])
 
     stats = {"new": 0, "updated": 0, "unchanged": 0, "skipped": 0}
     meta: dict = {}
@@ -117,11 +120,14 @@ def sync(folder, session, full: bool = False) -> dict:
     # The cursor is the instant the run STARTED reading, so anything that
     # changed mid-run is picked up next time. Saved only after a full pass:
     # an interrupted run simply redoes its window.
-    as_of = state.get("as_of") if stats["skipped"] else (meta.get("as_of") or state.get("as_of"))
+    keep = bool(stats["skipped"])
+    as_of = state.get("as_of") if keep else (meta.get("as_of") or state.get("as_of"))
+    reply_cursor = state.get("reply_cursor") if keep else meta.get("reply_cursor", state.get("reply_cursor"))
     state = {
         "version": 1,
         "base_url": base_url(),
         "as_of": as_of,
+        "reply_cursor": reply_cursor,
         "files": dict(sorted(files.items(), key=lambda kv: int(kv[0]))),
     }
     _write_atomic(folder / CURSOR_FILE, json.dumps(state, indent=2) + "\n")
