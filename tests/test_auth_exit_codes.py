@@ -85,6 +85,15 @@ class ExitCodeTests(unittest.TestCase):
         r = CliRunner().invoke(cli.app, ["token", "create", "--name", "x", "--expires", "7d"])
         self.assertEqual(r.exit_code, EXIT_USAGE)
 
+    def test_token_is_shown_even_when_the_keychain_save_fails(self):
+        created = {"id": 9, "name": "x", "token": "ln_pat_SHOWN", "expires_at": "2027-01-01T00:00:00Z"}
+        with mock.patch.object(cli, "get_session_token", return_value="lna_s"), \
+                mock.patch.object(cli, "post", return_value=created), \
+                mock.patch.object(cli, "save_pat", side_effect=RuntimeError("no keyring")):
+            r = CliRunner().invoke(cli.app, ["token", "create", "--name", "x", "--save"])
+        self.assertEqual(r.exit_code, 0)
+        self.assertIn("ln_pat_SHOWN", r.output)
+
     def test_network_failure_exits_4(self):
         with mock.patch.object(cli, "app", side_effect=httpx.ConnectError("refused")):
             with self.assertRaises(SystemExit) as ctx:

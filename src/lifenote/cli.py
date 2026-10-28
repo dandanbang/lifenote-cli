@@ -223,18 +223,24 @@ def token_create(
                        {"name": name, "expires_in_days": int(expires[:-1])}, token=session)
     except APIError as e:
         _handle_api_error(e)
-    if save:
-        save_pat(created["token"])
+    # Show it before anything else can fail: the server already minted it.
     if json:
         emit(created, True)
-        return
-    console.print(f"[green]Created[/] token [bold]{created['name']}[/] (id {created['id']}), "
-                  f"read-only, expires {created['expires_at'][:10]}.", highlight=False)
-    console.print("\nCopy it now; it will not be shown again:\n")
-    print(created["token"])
-    console.print(f"\nFor cron / CI:  export {ENV_TOKEN_VAR}=<the token above>", highlight=False)
+    else:
+        console.print(f"[green]Created[/] token [bold]{created['name']}[/] (id {created['id']}), "
+                      f"read-only, expires {created['expires_at'][:10]}.", highlight=False)
+        console.print("\nCopy it now; it will not be shown again:\n")
+        print(created["token"], flush=True)
+        console.print(f"\nFor cron / CI:  export {ENV_TOKEN_VAR}=<the token above>", highlight=False)
     if save:
-        console.print("[dim]Saved to this machine's keychain as the default token.[/]")
+        try:
+            save_pat(created["token"])
+        except Exception as e:
+            err_console.print(f"[yellow]Couldn't save it to the keychain ({type(e).__name__}).[/] "
+                              f"Use {ENV_TOKEN_VAR} instead.", highlight=False)
+        else:
+            if not json:
+                console.print("[dim]Saved to this machine's keychain as the default token.[/]")
 
 
 @token_app.command("list")

@@ -17,7 +17,7 @@ import sys
 
 import httpx
 
-from .auth import get_token, _refresh_with_lock, _read_keyring_blob
+from .auth import get_token, token_source, _refresh_with_lock, _read_keyring_blob
 from .api import USER_AGENT
 from .config import base_url
 
@@ -44,6 +44,10 @@ def run() -> None:
         return _http_client.post(url, headers=h, content=line)
 
     def refresh_or_die() -> bool:
+        # An env-var token (usually a PAT) has nothing to refresh, and the
+        # keychain must stay untouched when one is set.
+        if token_source()[1] and token_source()[1].startswith("env "):
+            return False
         # Cross-process lock + keyring re-read so concurrent proxies don't
         # both rotate and burn the family (Codex round 3 P2 #4)
         blob = _read_keyring_blob()
