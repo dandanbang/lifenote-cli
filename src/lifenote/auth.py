@@ -208,9 +208,15 @@ def _try_refresh(refresh_plain: str) -> str | None:
                 data={'grant_type': 'refresh_token', 'refresh_token': refresh_plain},
             )
         if r.status_code != 200:
-            # invalid_grant could mean: expired, revoked, OR reuse detected
-            # (family burned). In any case, the stored creds are dead.
-            clear_token()
+            # Only invalid_grant proves this session is dead. Rate limits,
+            # outages and client/configuration errors must preserve it.
+            try:
+                error = r.json()
+            except ValueError:
+                error = None
+            if (r.status_code in (400, 401) and isinstance(error, dict)
+                    and error.get('error') == 'invalid_grant'):
+                clear_token()
             return None
         body = r.json()
         store_credentials(

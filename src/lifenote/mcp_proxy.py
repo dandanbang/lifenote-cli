@@ -1,61 +1,72 @@
-"""
-stdio MCP server that proxies to the HTTP MCP endpoint.
+"""stdio MCP proxy for the HTTP endpoint, with one sign-in refresh on 401.
 
-Reads JSON-RPC requests from stdin (one per line), forwards each to
-POST /api/agent/v1/mcp with the user's Bearer token, writes the response
-back to stdout. Lives as `lifenote mcp` so MCP clients (Claude Desktop,
-Cursor) can spawn the binary without dealing with HTTP+auth themselves.
-
-Long-running correctness (Codex round 2 P2 #6 + #7):
-  - 202 No Content → notification; emit nothing per JSON-RPC spec
-  - 401 → refresh access token from keyring (refresh path) and retry once;
-    if refresh fails, emit JSON-RPC error and ask user to re-login
-  - The proxy holds a single session id across requests
+Only requests receive replies; notifications never produce stdout responses.
+HTTP/transport failures and invalid upstream responses become correlated errors.
 """
 import json
 import sys
 
 import httpx
 
-from .auth import get_token, token_source, _refresh_with_lock, _read_keyring_blob
+from .auth import token_source, _refresh_with_lock, _read_keyring_blob
 from .api import USER_AGENT
 from .config import base_url
 
 
+def _auth_error(source: str | None) -> str:
+    if source == "keychain (personal access token)":
+        return ("lifenote: saved personal access token was refused (expired or revoked); "
+                "run `lifenote token create --name mcp --save` to replace it or "
+                "`lifenote auth logout` to remove saved credentials")
+    if source and source.startswith("env "):
+        return f"lifenote: token from {source} was refused; replace or unset that environment variable"
+    return ("lifenote: sign-in token was refused and refresh did not restore access; "
+            "retry later or run `lifenote auth login`")
+
+
+def _valid_response(body, req_id) -> bool:
+    if not isinstance(body, dict) or body.get("jsonrpc") != "2.0":
+        return False
+    if "id" not in body or type(body["id"]) is not type(req_id) or body["id"] != req_id:
+        return False
+    if ("result" in body) == ("error" in body):
+        return False
+    if "error" in body:
+        error = body["error"]
+        return (isinstance(error, dict) and type(error.get("code")) is int
+                and isinstance(error.get("message"), str))
+    return True
+
+
 def run() -> None:
-    if not get_token():
+    if not token_source()[0]:
         sys.stderr.write("lifenote mcp: no token. Run `lifenote auth login` first.\n")
         sys.exit(1)
 
     session_id: str | None = None
     url = f"{base_url()}/api/agent/v1/mcp"
 
-    def headers_with_token() -> dict:
-        return {
-            "Authorization": f"Bearer {get_token() or ''}",
+    def post_once(line: str, sid: str | None, token: str | None) -> httpx.Response:
+        headers = {
+            "Authorization": f"Bearer {token or ''}",
             "Content-Type": "application/json",
             "User-Agent": f"{USER_AGENT} (mcp_proxy)",
         }
-
-    def post_once(line: str, sid: str | None) -> httpx.Response:
-        h = headers_with_token()
         if sid:
-            h["Mcp-Session-Id"] = sid
-        return _http_client.post(url, headers=h, content=line)
+            headers["Mcp-Session-Id"] = sid
+        return client.post(url, headers=headers, content=line)
 
-    def refresh_or_die() -> bool:
-        # An env-var token (usually a PAT) has nothing to refresh, and the
-        # keychain must stay untouched when one is set.
-        if token_source()[1] and token_source()[1].startswith("env "):
-            return False
-        # Cross-process lock + keyring re-read so concurrent proxies don't
-        # both rotate and burn the family (Codex round 3 P2 #4)
+    def refresh(source: str | None) -> str | None:
+        # Refresh only the credential actually sent, never a lower-priority
+        # sign-in hidden by a PAT. Keep the cross-process rotation lock.
+        if source != "keychain (sign-in)":
+            return None
         blob = _read_keyring_blob()
         if not blob or not blob.get('refresh'):
-            return False
-        return _refresh_with_lock(blob['refresh']) is not None
+            return None
+        return _refresh_with_lock(blob['refresh'])
 
-    with httpx.Client(timeout=120.0) as _http_client:
+    with httpx.Client(timeout=120.0) as client:
         for line in sys.stdin:
             line = line.strip()
             if not line:
@@ -66,43 +77,51 @@ def run() -> None:
                 _emit({"jsonrpc": "2.0", "id": None,
                        "error": {"code": -32700, "message": "Parse error"}})
                 continue
-
-            try:
-                r = post_once(line, session_id)
-                # 401 → token expired; refresh once and retry
-                if r.status_code == 401:
-                    if refresh_or_die():
-                        # Session may have been bound to the old token; drop it
-                        # so we re-initialize cleanly.
-                        session_id = None
-                        r = post_once(line, None)
-                    else:
-                        _emit({"jsonrpc": "2.0", "id": req.get("id"),
-                               "error": {"code": -32001,
-                                         "message": "lifenote: token expired and refresh failed; run `lifenote auth login`"}})
-                        continue
-            except httpx.HTTPError as e:
-                _emit({"jsonrpc": "2.0", "id": req.get("id"),
-                       "error": {"code": -32603, "message": f"transport error: {e}"}})
+            if not isinstance(req, dict):
+                _emit({"jsonrpc": "2.0", "id": None,
+                       "error": {"code": -32600, "message": "Invalid Request"}})
                 continue
 
-            # Capture the session id on initialize so subsequent calls echo it
-            if req.get("method") == "initialize":
+            def fail(code: int, message: str) -> None:
+                if "id" in req:
+                    _emit({"jsonrpc": "2.0", "id": req["id"],
+                           "error": {"code": code, "message": message}})
+
+            token, source = token_source()
+            try:
+                r = post_once(line, session_id, token)
+                if r.status_code == 401:
+                    rotated = refresh(source)
+                    if rotated:
+                        # A session may be bound to the old access token.
+                        session_id = None
+                        r = post_once(line, None, rotated)
+                    if r.status_code == 401:
+                        fail(-32001, _auth_error(source))
+                        continue
+            except httpx.HTTPError:
+                fail(-32603, "lifenote: transport error contacting MCP server")
+                continue
+
+            # Notifications must not receive replies, even on auth/HTTP errors.
+            if "id" not in req:
+                continue
+            if not 200 <= r.status_code < 300:
+                fail(-32603, f"lifenote: HTTP {r.status_code} from MCP server")
+                continue
+            try:
+                body = r.json()
+            except ValueError:
+                body = None
+            if not _valid_response(body, req["id"]):
+                fail(-32603, "lifenote: server returned an invalid JSON-RPC response")
+                continue
+
+            if req.get("method") == "initialize" and "result" in body:
                 sid = r.headers.get("Mcp-Session-Id")
                 if sid:
                     session_id = sid
-
-            # Notifications: server returns 202 No Content; spec says emit
-            # nothing back to the MCP client (Codex round 2 P2 #6).
-            if r.status_code == 202 or not r.content:
-                continue
-
-            try:
-                _emit(r.json())
-            except ValueError:
-                _emit({"jsonrpc": "2.0", "id": req.get("id"),
-                       "error": {"code": -32603,
-                                 "message": f"server returned non-JSON: {r.text[:200]}"}})
+            _emit(body)
 
 
 def _emit(obj) -> None:
