@@ -298,6 +298,8 @@ def search(
     json: bool = typer.Option(False, "--json"),
 ):
     """Search journal entries, mentor responses, and conversations."""
+    if len(query) < 2:
+        _fail(EXIT_USAGE, "[red]Search term must be at least 2 characters.[/]")
     params = {"q": query, "limit": limit}
     if since:
         params["since"] = since
